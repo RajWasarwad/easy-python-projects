@@ -116,23 +116,24 @@ import time
 # Global status for graceful shutdown
 PROGRAM_STATUS = True
 
+
 class Gimbal:
     def __init__(self, port, baud=115200):
         self.port = port
         self.baud = baud
         self.ser = None
-        
+
         # --- Internal State (Latest Status) ---
         self.state = {
             "azimuth": 0.0,
             "elevation": 0.0,
             "actuator": "Unknown",
             "brake": "Unknown",
-            "last_update": 0
+            "last_update": 0,
         }
-        
+
         self.lock = threading.Lock()
-        self.write_lock = threading.Lock() # Prevents command collision
+        self.write_lock = threading.Lock()  # Prevents command collision
         self.thread = threading.Thread(target=self._reader_loop, daemon=True)
 
     # --- Initialization & Lifecycle ---
@@ -156,46 +157,78 @@ class Gimbal:
     # --- Background Reader (Status Monitoring) ---
     def _reader_loop(self):
         global PROGRAM_STATUS
+        raw_buffer = bytearray()
+
         while PROGRAM_STATUS:
-            if not self.ser or not self.ser.is_open: break
+            if not self.ser or not self.ser.is_open:
+                break
 
-            # Sync on Header
-            header = self.ser.read(1)
-            if not header or header[0] != 0xAA: continue
+            # 1. Read all available bytes into the buffer
+            if self.ser.in_waiting > 0:
+                raw_buffer.extend(self.ser.read(self.ser.in_waiting))
 
-            # Read Length
-            len_byte = self.ser.read(1)
-            if not len_byte: continue
-            msg_len = len_byte[0]
+            # 2. Process the buffer while it has enough data for at least a small packet
+            # Minimum packet length is 5 bytes (Header, Len, Type, Data, CS)
+            while len(raw_buffer) >= 5:
+                # Find the first occurrence of the header 0xAA
+                if raw_buffer[0] != 0xAA:
+                    raw_buffer.pop(0)  # Discard junk byte
+                    continue
 
-            # Read Body (Type + Payload + Checksum)
-            remaining = self.ser.read(msg_len - 2)
-            if len(remaining) < (msg_len - 2): continue
+                # We found a header, check the length byte
+                msg_len = raw_buffer[1]
 
-            # Checksum Verification
-            full_packet_minus_cs = header + len_byte + remaining[:-1]
-            if self._calculate_xor(full_packet_minus_cs) != remaining[-1]:
-                continue
+                # Safety check: if msg_len is impossibly small or large, it's a false header
+                if msg_len < 5 or msg_len > 20:
+                    raw_buffer.pop(0)  # Discard the fake header
+                    continue
 
-            msg_type = remaining[0]
-            payload = remaining[1:-1]
-            self._parse_incoming(msg_type, payload)
+                # Do we have the full packet in the buffer yet?
+                if len(raw_buffer) < msg_len:
+                    break  # Wait for more data to arrive
 
-        if self.ser:
-            self.ser.close()
-            print("[Gimbal] Serial port closed.")
+                # We have enough bytes for a full packet! Extract it.
+                packet = raw_buffer[:msg_len]
+
+                # Checksum check
+                # Checksum is the XOR of everything except the last byte
+                calc_xor = self._calculate_xor(packet[:-1])
+                received_xor = packet[-1]
+
+                if calc_xor == received_xor:
+                    # VALID PACKET: Parse it!
+                    msg_type = packet[2]
+                    payload = packet[3:-1]
+                    self._update_internal_state(msg_type, payload)
+
+                    # Remove the processed packet from buffer
+                    del raw_buffer[:msg_len]
+                else:
+                    # INVALID CHECKSUM: The 0xAA might have been data, not a header.
+                    # Pop the first byte and keep scanning.
+                    raw_buffer.pop(0)
+
+            # Tiny sleep to prevent 100% CPU usage if no data is coming
+            time.sleep(0.001)
 
     def _parse_incoming(self, msg_type, payload):
         with self.lock:
             self.state["last_update"] = time.time()
-            if msg_type == 0x0A: # Status: Az/El
-                self.state["azimuth"], self.state["elevation"] = struct.unpack('<ff', payload)
-            elif msg_type in [0x25, 0x29]: # Status: Actuator
-                mapping = {0x00: "Retracted", 0xFF: "Extended", 0x55: "In Motion", 0x65: "In Motion"}
+            if msg_type == 0x0A:  # Status: Az/El
+                self.state["azimuth"], self.state["elevation"] = struct.unpack(
+                    "<ff", payload
+                )
+            elif msg_type in [0x25, 0x29]:  # Status: Actuator
+                mapping = {
+                    0x00: "Retracted",
+                    0xFF: "Extended",
+                    0x55: "In Motion",
+                    0x65: "In Motion",
+                }
                 self.state["actuator"] = mapping.get(payload[0], "Unknown")
-            elif msg_type == 0x27: # Status: Brake Engaged
+            elif msg_type == 0x27:  # Status: Brake Engaged
                 self.state["brake"] = "Engaged"
-            elif msg_type == 0x28: # Status: Brake Disengaged
+            elif msg_type == 0x28:  # Status: Brake Disengaged
                 self.state["brake"] = "Disengaged"
 
     # --- Command Methods (Sending Data) ---
@@ -204,7 +237,7 @@ class Gimbal:
         header = 0xAA
         # Length = Header(1) + LenByte(1) + Type(1) + Payload(N) + Checksum(1)
         length = 1 + 1 + 1 + len(payload_bytes) + 1
-        
+
         packet = bytearray([header, length, msg_type])
         packet.extend(payload_bytes)
         packet.append(self._calculate_xor(packet))
@@ -216,15 +249,18 @@ class Gimbal:
     def set_angles(self, azimuth=None, elevation=None):
         """Sets Azimuth and/or Elevation setpoints (4-byte floats)."""
         if elevation is not None:
-            self._send_command(0x20, struct.pack('<f', float(elevation)))
+            self._send_command(0x20, struct.pack("<f", float(elevation)))
         if azimuth is not None:
-            self._send_command(0x21, struct.pack('<f', float(azimuth)))
+            self._send_command(0x21, struct.pack("<f", float(azimuth)))
 
     def set_orientation(self, pitch=None, yaw=None, roll=None):
         """Sets Pitch, Yaw, or Roll setpoints."""
-        if pitch is not None: self._send_command(0x22, struct.pack('<f', float(pitch)))
-        if yaw is not None:   self._send_command(0x23, struct.pack('<f', float(yaw)))
-        if roll is not None:  self._send_command(0x24, struct.pack('<f', float(roll)))
+        if pitch is not None:
+            self._send_command(0x22, struct.pack("<f", float(pitch)))
+        if yaw is not None:
+            self._send_command(0x23, struct.pack("<f", float(yaw)))
+        if roll is not None:
+            self._send_command(0x24, struct.pack("<f", float(roll)))
 
     def control_actuator(self, command_type="engage", state=0x00):
         """
@@ -237,7 +273,9 @@ class Gimbal:
     def control_brake(self, action="apply"):
         """action: "apply" (0x27) or "release" (0x28)"""
         if action == "apply":
-            self._send_command(0x27, bytes([0x01])) # Sending 1 byte payload as per struct
+            self._send_command(
+                0x27, bytes([0x01])
+            )  # Sending 1 byte payload as per struct
         else:
             self._send_command(0x28, bytes([0x01]))
 
@@ -245,26 +283,30 @@ class Gimbal:
         with self.lock:
             return self.state.copy()
 
+
 # --- Main Application Logic ---
 if __name__ == "__main__":
-    gimbal = Gimbal(port='/dev/ttyUSB0') # Adjust to your port (e.g., 'COM3')
-    
+    gimbal = Gimbal(port="/dev/ttyUSB0")  # Adjust to your port (e.g., 'COM3')
+
     if gimbal.start():
         try:
             while PROGRAM_STATUS:
                 # 1. Read latest status
                 status = gimbal.get_status()
-                print(f"\r[STATUS] AZ: {status['azimuth']:.2f} EL: {status['elevation']:.2f} "
-                      f"Act: {status['actuator']} Brake: {status['brake']}", end="")
+                print(
+                    f"\r[STATUS] AZ: {status['azimuth']:.2f} EL: {status['elevation']:.2f} "
+                    f"Act: {status['actuator']} Brake: {status['brake']}",
+                    end="",
+                )
 
                 # 2. Example: Send Commands based on logic
                 # Let's say we want to move to 45, 45 if we aren't there
                 # gimbal.set_angles(azimuth=45.0, elevation=45.0)
-                
+
                 # gimbal.control_brake("release")
                 # gimbal.control_actuator("extend", 0xFF)
 
-                time.sleep(0.1) # Main loop rate
+                time.sleep(0.1)  # Main loop rate
 
         except KeyboardInterrupt:
             print("\n[Main] User interrupted. Shutting down...")
@@ -338,6 +380,7 @@ Extend Actuator Command Packet Structure: (5 bytes)
 Header  Message_Length  Message_Type    Actuator      Checksum
 (0xAA)      (0x05)        (0x29)        (1 bytes)    (dependant on data)
 """
+
 
 ""
 
