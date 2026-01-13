@@ -381,7 +381,60 @@ Header  Message_Length  Message_Type    Actuator      Checksum
 (0xAA)      (0x05)        (0x29)        (1 bytes)    (dependant on data)
 """
 
+That is a crucial piece of information. If the exact same code and GCS setup work perfectly on another Jetson, we can rule out your Flask code and the network.
 
+The problem is specific to the **hardware or the low-level configuration** of that particular Jetson Xavier.
+
+Since you aren't running any detection code, those "4 boxes" and "red glitches" are likely being injected by the **Image Signal Processor (ISP)** or the **Camera Firmware** itself.
+
+---
+
+### **Potential Culprits on the Specific Jetson**
+
+#### **1. Privacy Masks or Motion Detection (Most Likely)**
+
+Many high-resolution cameras (especially IP cameras or those using the Sony IMX sensors common with Jetson) have built-in **Privacy Masking** or **Hardware Motion Detection**.
+
+* **The Symptom:** These features often manifest as 4-8 static rectangles. When motion is detected inside them, the box changes color (often to red) or flickers to alert the user.
+* **Why it's happening:** This feature might be enabled in the camera's non-volatile memory or via a specific `v4l2` (Video4Linux) control setting that is toggled "ON" on this specific Jetson.
+
+#### **2. Nvidia Argus "Test Pattern" or Debug Overlays**
+
+If you are using the `nvarguscamerasrc` GStreamer element, there are debug flags that can overlay metadata or "regions of interest" (ROI) on the raw stream.
+
+* **The Fix:** Check if there is an environment variable or a configuration file in `/etc/en_nvidia/` that differs between the two Jetsons.
+
+#### **3. Sensor/CSI Cable Interference**
+
+High-resolution streams are very sensitive to EMI (Electromagnetic Interference).
+
+* **The Symptom:** If the MIPI CSI ribbon cable is damaged or poorly seated, you can get "blocky" artifacts. However, these usually look like random digital noise, not perfectly shaped "4 boxes."
+* **The "Red" Glitch:** If the "boxes" are perfectly rectangular, it is almost certainly a **software/firmware overlay**, not a physical cable fault.
+
+---
+
+### **How to Isolate the Issue**
+
+To prove it's the Jetson/Camera hardware and not your Flask app, run a standard GStreamer test in the terminal of the "glitchy" Jetson:
+
+```bash
+# This bypasses Flask and displays the raw feed directly to a window
+gst-launch-1.0 nvarguscamerasrc ! 'video/x-raw(memory:NVMM),width=1920,height=1080' ! nvvidconv ! xvimagesink
+
+```
+
+**If you still see the boxes here:** The issue is in the **Argus Daemon** or the **Camera Firmware**.
+**If you don't see the boxes here:** The issue is in how **OpenCV** or **Flask** is accessing the camera on that specific machine (check library versions).
+
+### **Recommended Steps**
+
+1. **Compare V4L2 Controls:** Run this on both Jetsons and look for differences in "Privacy Mask" or "Motion" settings:
+`v4l2-ctl -d /dev/video0 --list-ctrls`
+2. **Check JetPack Versions:** Ensure both are on the same version.
+`cat /etc/nv_tegra_release`
+3. **Swap the Cameras:** If possible, swap the camera and cable from the "working" Jetson to the "glitchy" one. This will tell you instantly if the problem is the Xavier or the Camera module itself.
+
+**When you run the GStreamer command above, do the boxes still appear on the monitor connected to the Jetson?**
 ""
 
 #   https://pdm.fming.dev/#use-with-ide
