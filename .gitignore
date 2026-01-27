@@ -108,6 +108,76 @@ ipython_config.py
 #   in version control.
 
 """
+import time
+import math
+
+class PID:
+    def __init__(self, Kp, Ki, Kd, limit, alpha=0.1):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.limit = limit  # Max angular speed or step
+        self.alpha = alpha  
+        self.prev_error = 0
+        self.integral = 0
+        self.filtered_derivative = 0
+        
+
+    def update(self, error):
+        
+        
+        # Proportional
+        P = self.Kp * error
+        
+        # Integral
+        self.integral += error
+        I = self.Ki * self.integral
+        
+        # 3. Derivative with Low-Pass Filter
+        derivative = (error - self.prev_error)
+        self.filtered_derivative = (self.alpha * derivative) + (1 - self.alpha) * self.filtered_derivative
+        D = self.Kd * self.filtered_derivative
+        
+        output = P + I + D
+        
+        output = max(min(output, self.limit), -self.limit)
+        
+        self.prev_error = error
+        
+        return output
+
+
+
+yaw_pid = PID(Kp=0.6, Ki=0.05, Kd=0.1, limit=15.0) # Limit 15 deg/sec
+pitch_pid = PID(Kp=0.6, Ki=0.05, Kd=0.1, limit=15.0)
+
+def calculate_angles(target_x, target_y, current_fov_h, current_fov_v, img_w, img_h):
+    # 1. Calculate pixel error from center
+    err_x = target_x - (img_w / 2)
+    err_y = target_y - (img_h / 2)
+    
+    # 2. Convert pixel error to angular error (Degrees)
+    # Using the linear approximation for speed
+    angle_err_x = err_x * (current_fov_h / img_w)
+    angle_err_y = err_y * (current_fov_v / img_h)
+    
+    # 3. Process through PID
+    # This returns the DELTA angle or VELOCITY to apply
+    delta_yaw = yaw_pid.update(angle_err_x)
+    delta_pitch = pitch_pid.update(angle_err_y)
+    
+    return delta_yaw, delta_pitch
+
+# Example Loop
+# current_yaw, current_pitch = get_current_angles()
+# dy, dp = calculate_angles(obj.x, obj.y, 60.0, 45.0, 1920, 1080)
+# move_to(current_yaw + dy, current_pitch + dp)
+
+
+
+
+
+
 import serial
 import struct
 import threading
