@@ -1,0 +1,135 @@
+Using UDP broadcasting is the ultimate upgrade for an offline P2P application. It removes the need to manually type the server's static IP address into the client.
+Instead, the server continuously shouts, "Hey, I am a P2P Server, here is my IP!" into the offline local airwaves, and any client on the same wireless network automatically hears it, extracts the server's IP, and establishes a secure TCP connection.
+1. The Offline Auto-Discovering Server
+This server script does two things simultaneously:
+Spawns a background thread to broadcast its IP address over UDP port 5556 every 2 seconds.
+Listens for direct TCP peer connections on TCP port 5555.
+
+import socket
+import subprocess
+import re
+import time
+import threading
+
+def get_wlan_ip():
+    try:
+        result = subprocess.run(['ip', '-o', '-4', 'addr', 'show'], capture_output=True, text=True, check=True)
+        for line in result.stdout.splitlines():
+            if ' wl' in line:
+                match = re.search(r'inet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+                if match and match.group(1) != "127.0.0.1":
+                    return match.group(1)
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+def udp_broadcast_beacon(server_ip, broadcast_port):
+    """Continuously broadcasts the server's presence over the offline network."""
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Enable broadcasting privileges on this socket
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    
+    print(f"[BEACON] UDP Broadcasting beacon active on port {broadcast_port}...")
+    
+    # Send to the universal local subnet broadcast address
+    broadcast_address = ("255.255.255.255", broadcast_port)
+    message = f"P2P_SERVER_DISCOVER:{server_ip}".encode('utf-8')
+    
+    try:
+        while True:
+            udp_socket.sendto(message, broadcast_address)
+            time.sleep(2)  # Broadcast every 2 seconds
+    except KeyboardInterrupt:
+        pass
+    finally:
+        udp_socket.close()
+
+def start_p2p_server(tcp_port=5555, udp_port=5556):
+    my_ip = get_wlan_ip()
+    print(f"[STARTING] Offline P2P Server initialized.")
+    print(f"[INFO] Detected local Static IP: {my_ip}")
+
+    # Start the discovery beacon in a separate background thread
+    beacon_thread = threading.Thread(target=udp_broadcast_beacon, args=(my_ip, udp_port), daemon=True)
+    beacon_thread.start()
+
+    # Setup the main TCP listening socket
+    tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp_server.bind(('0.0.0.0', tcp_port))
+    tcp_server.listen(1)
+    print(f"[LISTENING] TCP Server listening for connections on port {tcp_port}...")
+
+    try:
+        while True:
+            conn, addr = tcp_server.accept()
+            print(f"[CONNECTED] Client successfully connected from: {addr}")
+            
+            # Simple offline data handshake
+            data = conn.recv(1024).decode('utf-8')
+            print(f"[DATA RECEIVED] -> {data}")
+            
+            conn.send("Handshake complete! Connected to Ubuntu server successfully.".encode('utf-8'))
+            conn.close()
+            print("[DISCONNECTED] Client transaction finished. Waiting for next peer...")
+    except KeyboardInterrupt:
+        print("\n[STOPPING] Shutting down P2P server.")
+    finally:
+        tcp_server.close()
+
+if __name__ == "__main__":
+    start_p2p_server()
+
+
+2. The Auto-Discovering Client
+The client doesn't need to know the server's IP anymore. When booted up, it listens passively on UDP port 5556, grabs the server's static IP out of the airwaves, shuts down the listener, and instantly opens a direct TCP connection.
+
+import socket
+
+def discover_and_connect(tcp_port=5555, udp_port=5556):
+    # 1. Listen for the UDP broadcast beacon
+    udp_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Allow multiple apps to bind to the same broadcast port if needed
+    udp_client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Bind to all interfaces to listen for the broadcast
+    udp_client.bind(('', udp_port))
+    
+    print(f"[DISCOVERING] Listening for offline server beacons on UDP port {udp_port}...")
+    
+    server_ip = None
+    try:
+        while True:
+            data, addr = udp_client.recvfrom(1024)
+            message = data.decode('utf-8')
+            
+            if message.startswith("P2P_SERVER_DISCOVER:"):
+                server_ip = message.split(":")[1]
+                print(f"[FOUND] Server detected automatically at IP: {server_ip}")
+                break  # Stop listening to broadcasts once we have the IP
+    finally:
+        udp_client.close()
+
+    # 2. Connect to the discovered server via TCP
+    if server_ip:
+        tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            print(f"[CONNECTING] Establishing TCP connection to {server_ip}:{tcp_port}...")
+            tcp_client.connect((server_ip, tcp_port))
+            print("[SUCCESS] Pipeline established!")
+            
+            tcp_client.send("Hello from the auto-discovered client device!".encode('utf-8'))
+            response = tcp_client.recv(1024).decode('utf-8')
+            print(f"[SERVER RESPONSE] {response}")
+            
+        except Exception as e:
+            print(f"[ERROR] Connection failed: {e}")
+        finally:
+            tcp_client.close()
+
+if __name__ == "__main__":
+    discover_and_connect()
+
+
+💡 Why this works perfectly for Offline Wi-Fi
+Zero Network Configuration: You don't need a DNS server or router interface. The 255.255.255.255 broadcast target addresses every hardware chip connected to that specific wireless ad-hoc or hotspot network profile.
+Resilient: If you reconfigure your Ubuntu manual static IP tomorrow from 192.168.1.10 to 10.0.0.5, you don't need to rebuild or touch your client application code. It adapts instantly.
+Would you like to build a multithreaded framework next so multiple clients can interact with your offline server simultaneously, or do you need to add file-sharing capabilities to this layout?
