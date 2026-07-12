@@ -194,3 +194,23 @@ sudo udevadm trigger
 Unplug your USB serial device from the computer and plug it back in.
 
 Now, if you run your python script, it will connect flawlessly. No `sudo`, no manual `chmod 777`, and it will persist every single time you reboot.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+import paramiko
+
+client = paramiko.SSHClient()
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+client.connect(
+    hostname="192.168.1.101",
+    username="raj",
+    password="your_password"
+)
+
+stdin, stdout, stderr = client.exec_command("sudo -S systemctl start tracking.service")
+
+stdin.write("your_password\n")
+stdin.flush()
+
+print(stdout.read().decode())
+print(stderr.read().decode())
