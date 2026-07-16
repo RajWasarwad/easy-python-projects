@@ -167,3 +167,102 @@ If you see `GStreamer: YES`, your system is fully optimized and ready to execute
 
 
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+To read the GStreamer UDP H.264 stream on your destination machine using OpenCV, you need to use `cv2.VideoCapture` with a matching GStreamer pipeline string as the input source.
+
+The receiving pipeline must mirror the configuration of the transmitter: it listens to the UDP port, defines the format capabilities (`caps`), strips away the network layer wrapper (`rtph264depay`), parses the H.264 stream, decodes it into raw pixels, and pushes it into an `appsink` element so OpenCV can read it as standard NumPy matrices.
+
+Here is the complete Python script for your destination machine to receive and display the stream with near-zero latency.
+
+### Destination Machine Receiver Script
+
+```python
+import cv2
+
+def create_receiver_pipeline(port=5000):
+    """
+    Constructs the GStreamer receiver pipeline string.
+    The caps string MUST exactly match the payload details emitted by the transmitter.
+    """
+    # OPTION A: Standard CPU-based decoding (Works on almost any PC/Laptop)
+    pipeline = (
+        f"udpsrc port={port} caps=\"application/x-rtp, media=(string)video, "
+        f"clock-rate=(integer)90000, encoding-name=(string)H264, payload=(integer)96\" ! "
+        f"rtph264depay ! "
+        f"h264parse ! "
+        f"avdec_h264 ! "
+        f"videoconvert ! "
+        f"appsink drop=true sync=false"
+    )
+
+    # OPTION B: NVIDIA Jetson Hardware Accelerated Decoding
+    # Uncomment the lines below if your destination machine is a Jetson board:
+    # pipeline = (
+    #     f"udpsrc port={port} caps=\"application/x-rtp, media=(string)video, "
+    #     f"clock-rate=(integer)90000, encoding-name=(string)H264, payload=(integer)96\" ! "
+    #     f"rtph264depay ! "
+    #     f"h264parse ! "
+    #     f"nvv4l2decoder ! "
+    #     f"nvvidconv ! video/x-raw, format=BGRx ! "
+    #     f"videoconvert ! "
+    #     f"appsink drop=true sync=false"
+    # )
+
+    return pipeline
+
+def main():
+    pipeline_str = create_receiver_pipeline(port=5000)
+    print("🔄 Initializing GStreamer Receiver Pipeline...")
+    
+    # Open the video stream using the GStreamer backend explicitly
+    cap = cv2.VideoCapture(pipeline_str, cv2.CAP_GSTREAMER)
+
+    if not cap.isOpened():
+        print("❌ Error: Could not open the GStreamer video stream.")
+        print("Verify that:")
+        print(" 1. The transmitter node is actively running and streaming.")
+        print(" 2. The destination IP/Port configuration match up.")
+        print(" 3. Your receiver's OpenCV build supports GStreamer.")
+        return
+
+    print("🚀 Stream connected! Press 'q' in the window to exit.")
+
+    while True:
+        ret, frame = cap.read()
+        
+        if not ret:
+            # Short sleep to prevent CPU spinning if a network frame drops transiently
+            print("⚠️ Frame dropped or delayed...")
+            continue
+
+        # You can now run downstream ground station applications here (like UI rendering)
+        cv2.imshow("Live OBC Telemetry Stream", frame)
+
+        # Break the loop when 'q' key is pressed
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Clean cleanup sequence
+    cap.release()
+    cv2.destroyAllWindows()
+    print("🛑 Stream closed successfully.")
+
+if __name__ == "__main__":
+    main()
+
+```
+
+### 💡 Crucial Performance Adjustments in the Pipeline:
+
+1. **`appsink drop=true`**: This is the single most important parameter for maintaining low latency on the receiver side. If your display window or processing framework lags behind for a fraction of a second, setting `drop=true` instructs GStreamer to instantly dump old, backlogged frames from its queue rather than buffering them. It keeps the buffer size at zero, guaranteeing that `cap.read()` always fetches the absolute latest live frame off the network stack.
+2. **`sync=false`**: Setting `sync=false` on the sink tells GStreamer to render the frames as fast as they drop out of the network interface, bypassing the internal clock sync timestamps. This strips out artificial smoothing delays and gives you the rawest packet arrival times.
+3. **OpenCV Environment Compatibility**: Just like the transmitting computer, ensure the receiver's OpenCV implementation has access to GStreamer tools by executing:
+```bash
+python3 -c "import cv2; print(cv2.getBuildInformation())" | grep -i gstreamer
+
+```
+
+
+If it shows `GStreamer: YES`, the script will hook straight into the streaming link seamlessly.
