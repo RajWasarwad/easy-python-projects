@@ -1,0 +1,12 @@
+def get_zoom_scaled_gains(zoom_level, kp_base, ki_base, kd_base):
+    """
+    As optical zoom increases (e.g. 1x -> 30x), effective FOV narrows.
+    Dampen outer loop gains to prevent high-frequency jitter/hunting.
+    """
+    scale_factor = 1.0 / np.sqrt(zoom_level) # Square root or linear decay works best
+    
+    kp_scaled = kp_base * scale_factor
+    ki_scaled = ki_base * scale_factor
+    kd_scaled = kd_base * scale_factor
+    
+    return kp_scaled, ki_scaled, kd_scaled
